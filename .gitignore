@@ -1,0 +1,25 @@
+# Build trees
+build/
+build-*/
+out/
+
+# CMake user files
+CMakeUserPresets.json
+compile_commands.json
+
+# IDE
+.idea/
+.vscode/
+*.user
+*.user.*
+
+# Runtime data
+*.db
+*.db-shm
+*.db-wal
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
