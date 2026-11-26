@@ -15,10 +15,11 @@ struct DecodedMessage {
 
 // next() 的返回值。
 enum class StreamStatus : quint8 {
-    Message,      // 成功取出一包，message 有效
-    NeedMoreData, // 数据不足，等待下一次 append
-    BadPacket,    // 丢弃了一个坏包/坏字节，调用方可以继续 next()
-    FatalError,   // 长度或缓冲超限，调用方必须断开连接
+    Message,            // 成功取出一包，message 有效
+    NeedMoreData,       // 数据不足，等待下一次 append
+    BadPacket,          // 丢弃了一个坏包/坏字节，调用方可以继续 next()
+    UnsupportedVersion, // 版本不支持，整包已丢弃，调用方应发送 ERROR 并断开
+    FatalError,         // 长度或缓冲超限，调用方必须断开连接
 };
 
 // 解包统计。

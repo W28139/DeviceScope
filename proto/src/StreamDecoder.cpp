@@ -88,7 +88,7 @@ StreamStatus StreamDecoder::next(DecodedMessage &message)
                 return StreamStatus::NeedMoreData;
             }
             dropBytes(total);
-            return StreamStatus::BadPacket;
+            return StreamStatus::UnsupportedVersion;
         }
         case ErrorCode::PayloadTooLarge:
             // 长度字段本身不可信或超出协议上限，流已无法安全恢复。

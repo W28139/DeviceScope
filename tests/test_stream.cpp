@@ -113,6 +113,7 @@ void StreamTest::badPacketRecovery()
 
     int messages = 0;
     int badPackets = 0;
+    int unsupportedVersions = 0;
     DecodedMessage message;
 
     while (true) {
@@ -126,12 +127,17 @@ void StreamTest::badPacketRecovery()
             ++badPackets;
             continue;
         }
+        if (result == StreamStatus::UnsupportedVersion) {
+            ++unsupportedVersions;
+            continue;
+        }
         QCOMPARE(status(result), status(StreamStatus::NeedMoreData));
         break;
     }
 
     QCOMPARE(messages, 2);
-    QCOMPARE(badPackets, 4); // 2 个垃圾字节 + 1 个坏 CRC + 1 个坏版本
+    QCOMPARE(badPackets, 3);           // 2 个垃圾字节 + 1 个坏 CRC
+    QCOMPARE(unsupportedVersions, 1);  // 1 个坏版本
     QCOMPARE(decoder.stats().badPacketCount, quint64(4));
     QCOMPARE(decoder.stats().droppedBytes,
              quint64(2 + badCrc.size() + badVersion.size()));

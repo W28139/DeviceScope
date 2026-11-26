@@ -7,7 +7,7 @@
 - **DeviceScope Client**：Qt Widgets 桌面客户端，负责连接、遥测展示、控制命令、报警、历史数据和日志；
 - **Device Simulator**：设备模拟器，负责生成遥测、响应命令、产生报警和注入故障。
 
-当前进度：**步骤 2（流式解包与协议测试）**。协议库已提供报文头、CRC32、7 类消息编解码和 TCP 流解包；客户端仍显示占位窗口，模拟器仍为 TCP 回显服务。
+当前进度：**步骤 3（模拟器基础链路）**。模拟器已实现 HELLO 握手、心跳、遥测、命令和报警；客户端仍显示占位窗口。
 
 ## 文档
 
@@ -51,20 +51,25 @@ cmake --build --preset linux-release -j
 启动模拟器（默认监听 `127.0.0.1:9000`）：
 
 ```bash
-./build/linux-debug/bin/devicescope-simulator --port 9000
+./build/linux-debug/bin/devicescope-simulator --host 127.0.0.1 --port 9000 --rate 10
 ```
 
-启动客户端：
+可选参数：
+
+- `--rate <hz>`：遥测频率，默认 10 Hz；
+- `--seed <n>`：随机噪声种子，默认 1，便于复现；
+- `--log-level <level>`：`debug`、`info`、`warning`、`critical`，默认 `info`。
+
+模拟器现在按 DeviceScope 协议通信（不再回显任意文本），可用测试套件验证：
+
+```bash
+ctest --preset linux-debug -R simulator --output-on-failure
+```
+
+启动客户端（步骤 5 之前仍只显示占位窗口）：
 
 ```bash
 ./build/linux-debug/bin/devicescope-client
-```
-
-当前模拟器是回显服务，可以用 `nc` 验证：
-
-```bash
-nc 127.0.0.1 9000
-# 输入任意文本，模拟器会原样返回
 ```
 
 ## 测试
@@ -83,7 +88,7 @@ ctest --preset linux-debug --output-on-failure
 ├── proto/                  # 协议库：报文头、CRC32、消息编解码与流式解包
 │   ├── include/devicescope/protocol/
 │   └── src/
-├── simulator/              # 设备模拟器
+├── simulator/              # 设备模拟器（协议服务）
 │   └── src/
 ├── client/                 # Qt 客户端
 │   └── src/

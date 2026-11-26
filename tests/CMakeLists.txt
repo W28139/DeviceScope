@@ -45,3 +45,18 @@ target_link_libraries(devicescope_stream_tests
 devicescope_set_warnings(devicescope_stream_tests)
 
 add_test(NAME proto_stream COMMAND devicescope_stream_tests)
+
+# 模拟器测试：握手、心跳、命令、遥测速率、报警滞回
+add_executable(devicescope_simulator_tests
+    test_simulator.cpp
+)
+
+target_link_libraries(devicescope_simulator_tests
+    PRIVATE
+        Qt6::Test
+        devicescope_simulator_core
+)
+
+devicescope_set_warnings(devicescope_simulator_tests)
+
+add_test(NAME simulator COMMAND devicescope_simulator_tests)
