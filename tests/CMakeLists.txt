@@ -60,3 +60,19 @@ target_link_libraries(devicescope_simulator_tests
 devicescope_set_warnings(devicescope_simulator_tests)
 
 add_test(NAME simulator COMMAND devicescope_simulator_tests)
+
+# 客户端网络测试：连接/握手/断开循环与失败提示
+add_executable(devicescope_client_tests
+    test_client_network.cpp
+)
+
+target_link_libraries(devicescope_client_tests
+    PRIVATE
+        Qt6::Test
+        devicescope_client_core
+        devicescope_simulator_core
+)
+
+devicescope_set_warnings(devicescope_client_tests)
+
+add_test(NAME client_network COMMAND devicescope_client_tests)

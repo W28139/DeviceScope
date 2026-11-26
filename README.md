@@ -7,7 +7,7 @@
 - **DeviceScope Client**：Qt Widgets 桌面客户端，负责连接、遥测展示、控制命令、报警、历史数据和日志；
 - **Device Simulator**：设备模拟器，负责生成遥测、响应命令、产生报警和注入故障。
 
-当前进度：**步骤 3（模拟器基础链路）**。模拟器已实现 HELLO 握手、心跳、遥测、命令和报警；客户端仍显示占位窗口。
+当前进度：**步骤 5（客户端连接骨架）**。客户端可连接模拟器并完成 HELLO 握手，显示连接状态、设备信息和收包数；遥测、报警、历史、日志页仍为占位。
 
 ## 文档
 
@@ -66,11 +66,13 @@ cmake --build --preset linux-release -j
 ctest --preset linux-debug -R simulator --output-on-failure
 ```
 
-启动客户端（步骤 5 之前仍只显示占位窗口）：
+启动客户端：
 
 ```bash
 ./build/linux-debug/bin/devicescope-client
 ```
+
+在顶部连接栏确认地址和端口（默认 `127.0.0.1:9000`），点击「连接」。连接成功后状态栏显示设备信息和收包数。
 
 ## 测试
 
@@ -93,6 +95,7 @@ ctest --preset linux-debug --output-on-failure
 ├── client/                 # Qt 客户端
 │   └── src/
 │       ├── app/
+│       ├── network/        # 连接线程、状态机、HELLO 握手
 │       └── ui/
 └── tests/                  # 单元测试与集成测试
 ```
