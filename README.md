@@ -7,12 +7,13 @@
 - **DeviceScope Client**：Qt Widgets 桌面客户端，负责连接、遥测展示、控制命令、报警、历史数据和日志；
 - **Device Simulator**：设备模拟器，负责生成遥测、响应命令、产生报警和注入故障。
 
-当前进度：**步骤 0（工程骨架）**。客户端只显示占位窗口，模拟器只提供 TCP 回显服务。
+当前进度：**步骤 1（协议常量与编解码）**。协议库已提供 22 字节报文头、CRC32 和 7 类消息的编解码；客户端仍显示占位窗口，模拟器仍为 TCP 回显服务。
 
 ## 文档
 
 - [开发计划](docs/DeviceScope-开发计划.md)：定位、范围、架构、协议、测试与最终验收标准；
-- [开发步骤](docs/DeviceScope-开发步骤.md)：按依赖顺序排列的 17 个开发步骤及每步验收标准。
+- [开发步骤](docs/DeviceScope-开发步骤.md)：按依赖顺序排列的 17 个开发步骤及每步验收标准；
+- [协议定义](docs/protocol.md)：报文格式、CRC32、消息类型与负载布局。
 
 ## 环境要求
 
@@ -79,7 +80,7 @@ ctest --preset linux-debug --output-on-failure
 ├── CMakeLists.txt
 ├── CMakePresets.json
 ├── cmake/                  # 编译选项等 CMake 模块
-├── proto/                  # 协议库（后续实现编解码与解包）
+├── proto/                  # 协议库：报文头、CRC32、消息编解码（解包在步骤 2）
 │   ├── include/devicescope/protocol/
 │   └── src/
 ├── simulator/              # 设备模拟器

@@ -1,5 +1,7 @@
 #include "devicescope/protocol/Version.h"
 
+#include "devicescope/protocol/Protocol.h"
+
 namespace devicescope::protocol {
 
 QString versionString()

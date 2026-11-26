@@ -155,7 +155,7 @@ nc 127.0.0.1 9000
    - 协议常量；
    - `MessageType`、`DeviceState`、`CommandId`、`AckResult` 枚举；
    - `Header` 结构体。
-3. `Crc32.h/.cpp`：表驱动实现，提供一次性计算和增量计算接口。
+3. `Crc32.h/.cpp`：表驱动实现，提供一次性 CRC32 计算。
 4. `Codec.h/.cpp`：
    - `encode(type, flags, requestId, payload)`；
    - `decodeHeader(QByteArrayView)`；

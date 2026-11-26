@@ -15,3 +15,18 @@ devicescope_set_warnings(devicescope_proto_tests)
 
 # 注册到 CTest：可用 ctest --preset linux-debug 运行
 add_test(NAME proto_placeholder COMMAND devicescope_proto_tests)
+
+# 编解码测试：CRC、报文头、各消息体往返、边界值
+add_executable(devicescope_codec_tests
+    test_codec.cpp
+)
+
+target_link_libraries(devicescope_codec_tests
+    PRIVATE
+        Qt6::Test
+        devicescope_proto
+)
+
+devicescope_set_warnings(devicescope_codec_tests)
+
+add_test(NAME proto_codec COMMAND devicescope_codec_tests)

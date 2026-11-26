@@ -1,5 +1,6 @@
 #include <QtTest>
 
+#include "devicescope/protocol/Protocol.h"
 #include "devicescope/protocol/Version.h"
 
 // 协议单元测试类：只做静态常量校验
