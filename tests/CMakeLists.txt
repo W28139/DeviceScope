@@ -30,3 +30,18 @@ target_link_libraries(devicescope_codec_tests
 devicescope_set_warnings(devicescope_codec_tests)
 
 add_test(NAME proto_codec COMMAND devicescope_codec_tests)
+
+# 流式解包测试：半包、粘包、坏包重同步与上限
+add_executable(devicescope_stream_tests
+    test_stream.cpp
+)
+
+target_link_libraries(devicescope_stream_tests
+    PRIVATE
+        Qt6::Test
+        devicescope_proto
+)
+
+devicescope_set_warnings(devicescope_stream_tests)
+
+add_test(NAME proto_stream COMMAND devicescope_stream_tests)

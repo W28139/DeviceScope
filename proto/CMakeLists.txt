@@ -4,6 +4,7 @@ add_library(devicescope_proto STATIC
     src/Crc32.cpp     # CRC32 表驱动实现
     src/Codec.cpp     # 报文头编解码与负载校验
     src/Message.cpp   # 各消息体的编解码
+    src/StreamDecoder.cpp # TCP 字节流解包（半包/粘包/重同步）
 )
 
 # 以 PUBLIC 暴露 include/，链接方可直接 #include "devicescope/protocol/..."
