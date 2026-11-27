@@ -11,6 +11,8 @@ NetworkClient::NetworkClient(QObject *parent)
     , m_worker(new ConnectionWorker)
 {
     qRegisterMetaType<ConnectionState>("devicescope::client::ConnectionState");
+    qRegisterMetaType<devicescope::protocol::CommandId>("devicescope::protocol::CommandId");
+    qRegisterMetaType<devicescope::protocol::AckResult>("devicescope::protocol::AckResult");
 
     m_worker->moveToThread(&m_thread);
 
@@ -22,8 +24,10 @@ NetworkClient::NetworkClient(QObject *parent)
             &ConnectionWorker::connectToHost);
     connect(this, &NetworkClient::disconnectRequested, m_worker,
             &ConnectionWorker::disconnectFromHost);
+    connect(this, &NetworkClient::commandRequested, m_worker,
+            &ConnectionWorker::sendCommand);
 
-    // 绑定worker线程中的信号，与UI线程中的函数
+    // 信号-信号连接（signal-to-signal），作用是转发信号 (解耦 / 封装) ———— worker线程的信号投递到这里，然后转到UI主线程的，槽函数在主线程中执行
     connect(m_worker, &ConnectionWorker::connectionStateChanged, this,
             &NetworkClient::connectionStateChanged);
     connect(m_worker, &ConnectionWorker::handshakeSucceeded, this,
@@ -32,6 +36,10 @@ NetworkClient::NetworkClient(QObject *parent)
             &NetworkClient::connectionError);
     connect(m_worker, &ConnectionWorker::statsChanged, this,
             &NetworkClient::statsChanged);
+    connect(m_worker, &ConnectionWorker::commandSent, this, &NetworkClient::commandSent);
+    connect(m_worker, &ConnectionWorker::commandAcknowledged, this,
+            &NetworkClient::commandAcknowledged);
+    connect(m_worker, &ConnectionWorker::commandFailed, this, &NetworkClient::commandFailed);
 
     m_thread.setObjectName(QStringLiteral("NetworkThread"));
     m_thread.start();
@@ -57,6 +65,11 @@ void NetworkClient::connectToHost(const QString &host, quint16 port)
 void NetworkClient::disconnectFromHost()
 {
     emit disconnectRequested();
+}
+
+void NetworkClient::sendCommand(devicescope::protocol::CommandId commandId)
+{
+    emit commandRequested(commandId);
 }
 
 } // namespace devicescope::client

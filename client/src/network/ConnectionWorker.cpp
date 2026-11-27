@@ -3,6 +3,7 @@
 #include "devicescope/protocol/Codec.h"
 #include "devicescope/protocol/Message.h"
 
+#include <QtCore/QDebug>
 #include <QtNetwork/QTcpSocket>
 
 namespace devicescope::client {
@@ -16,6 +17,7 @@ ConnectionWorker::ConnectionWorker(QObject *parent)
 
 void ConnectionWorker::start()
 {
+    m_clock.start();
     ensureSocket();
     emit connectionStateChanged(m_state);
 }
@@ -60,6 +62,46 @@ void ConnectionWorker::shutdown()
     }
 }
 
+// 发送一条命令，由 UI 线程中的信号触发，跨线程投递到 worker 线程执行
+void ConnectionWorker::sendCommand(CommandId commandId)
+{
+    // 分配请求 ID
+    const quint32 requestId = nextRequestId();
+
+    // 前置条件校验：必须已连接且有 socket，否则直接失败
+    if (m_state != ConnectionState::Connected || m_socket == nullptr) {
+        emit commandFailed(requestId, QStringLiteral("未连接"));
+        return;
+    }
+
+    // 编码命令体
+    const auto payload = encodeCommand(Command{commandId, 0});
+    if (!payload.hasValue()) {
+        emit commandFailed(requestId, QStringLiteral("COMMAND 编码失败"));
+        return;
+    }
+
+    // 封装成完整帧
+    const auto frame = encode(MessageType::Command, kFlagNone, requestId, payload.value());
+    if (!frame.hasValue()) {
+        emit commandFailed(requestId, QStringLiteral("COMMAND 报文编码失败"));
+        return;
+    }
+
+    // 写入 socket；write 返回 -1 表示立即失败
+    if (m_socket->write(frame.value()) < 0) {
+        emit commandFailed(requestId,
+                           QStringLiteral("发送失败: %1").arg(m_socket->errorString()));
+        return;
+    }
+
+    // 记录"待 ACK"请求：以 requestId 为 key，保存 commandId 和发送时刻
+    // 发送时刻用单调时钟，后续收到 ACK 时算 latencyMs
+    m_pending.insert(requestId, PendingRequest{commandId, m_clock.elapsed()});
+    // 通知外界"命令已发出"
+    emit commandSent(requestId, commandId);
+}
+
 void ConnectionWorker::ensureSocket()
 {
     if (m_socket != nullptr) {
@@ -92,6 +134,50 @@ void ConnectionWorker::fail(const QString &message)
     }
 }
 
+quint32 ConnectionWorker::nextRequestId()
+{
+    const quint32 id = m_nextRequestId++;
+    if (m_nextRequestId == 0) {  // 回绕到 0 时跳到 1，0 保留给未分配/无效请求
+        m_nextRequestId = 1;
+    }
+    return id;
+}
+
+// 处理服务端返回的 COMMAND_ACK，与 sendCommand() 中登记的 pending 记录闭环
+void ConnectionWorker::handleCommandAck(const DecodedMessage &message)
+{
+    // 1. 解码 ACK 负载（commandId / result / message 等）
+    const auto ack = decodeCommandAck(message.payload);
+    if (!ack.hasValue()) {  // 负载已通过 CRC，格式错误只记录并忽略
+        qWarning() << "COMMAND_ACK 解析失败";
+        return;
+    }
+
+    // 2. 用帧头里的 requestId 去 pending 表里找对应请求
+    const quint32 requestId = message.header.requestId;
+    const auto it = m_pending.find(requestId);
+    if (it == m_pending.end()) {  
+        // 找不到：可能是已超时清除、或服务端重复发 ACK，忽略即可
+        qWarning() << "收到未知 requestId 的 COMMAND_ACK:" << requestId;
+        return;
+    }
+    // 3. 校验 ACK 里的 commandId 是否和当初发出的命令一致
+    //    不一致说明协议/服务端有异常，但这里只告警、仍继续处理（宽松策略）
+    if (it->commandId != ack.value().commandId) {
+        qWarning() << "COMMAND_ACK 命令不匹配: 期望"
+                   << static_cast<int>(it->commandId) << "实际"
+                   << static_cast<int>(ack.value().commandId);
+    }
+
+    // 4. 用单调时钟计算延迟，然后从 pending 中移除，避免重复匹配
+    const qint64 latencyMs = m_clock.elapsed() - it->sentAtMs;
+    m_pending.erase(it);
+
+    // 5. 对外发出 ACK 信号，UI 据此更新命令状态、展示延迟/结果
+    emit commandAcknowledged(requestId, ack.value().commandId, ack.value().result,
+                             ack.value().message, latencyMs);
+}
+
 // 握手函数
 void ConnectionWorker::sendHello()
 {
@@ -102,7 +188,7 @@ void ConnectionWorker::sendHello()
         return;
     }
 
-    m_helloRequestId = m_nextRequestId++;
+    m_helloRequestId = nextRequestId();
     const auto frame =
         encode(MessageType::Hello, kFlagNone, m_helloRequestId, payload.value());
     if (!frame.hasValue()) {
@@ -184,6 +270,8 @@ void ConnectionWorker::onReadyRead()
                     emit handshakeSucceeded(response.value().deviceId,  // 上报设备 ID
                                             response.value().deviceName);  // 上报设备名
                 }
+            } else if (message.header.type == MessageType::CommandAck) {
+                handleCommandAck(message);  // 按 requestId 匹配命令响应
             }
             continue;  // 继续解下一帧（可能还有粘包）
         }

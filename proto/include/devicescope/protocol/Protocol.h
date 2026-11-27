@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QtCore/QMetaType>
 #include <QtCore/QtGlobal>
 
 namespace devicescope::protocol {
@@ -70,3 +71,7 @@ struct Header {
 };
 
 } // namespace devicescope::protocol
+
+// 这两个枚举会随信号跨线程传递，声明为 metatype 供排队连接使用。
+Q_DECLARE_METATYPE(devicescope::protocol::CommandId)
+Q_DECLARE_METATYPE(devicescope::protocol::AckResult)
