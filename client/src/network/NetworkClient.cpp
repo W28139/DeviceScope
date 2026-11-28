@@ -40,6 +40,8 @@ NetworkClient::NetworkClient(QObject *parent)
     connect(m_worker, &ConnectionWorker::commandAcknowledged, this,
             &NetworkClient::commandAcknowledged);
     connect(m_worker, &ConnectionWorker::commandFailed, this, &NetworkClient::commandFailed);
+    connect(m_worker, &ConnectionWorker::commandTimedOut, this,
+            &NetworkClient::commandTimedOut);
 
     m_thread.setObjectName(QStringLiteral("NetworkThread"));
     m_thread.start();

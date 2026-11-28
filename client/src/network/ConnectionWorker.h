@@ -10,6 +10,7 @@
 #include <QtCore/QObject>
 
 class QTcpSocket;
+class QTimer;
 
 namespace devicescope::client {
 
@@ -38,6 +39,7 @@ signals:
                              devicescope::protocol::AckResult result, const QString &message,
                              qint64 latencyMs);
     void commandFailed(quint32 requestId, const QString &reason);
+    void commandTimedOut(quint32 requestId);
 
 private:
     // 已发送、等待 COMMAND_ACK 的命令。
@@ -50,12 +52,15 @@ private:
     void setState(ConnectionState state); // 更新连接状态并发出信号
     void fail(const QString &message);    // 统一错误处理
     void sendHello();      // 发送握手 HELLO
+    void sendHeartbeat();  // 发送一次心跳
     void onConnected();    // socket 连接成功回调
     void onDisconnected(); // socket 断开回调
     void onReadyRead();    // socket 可读回调，交给 StreamDecoder 解码
     void onSocketError();  // socket 错误回调
     quint32 nextRequestId(); // 生成下一个请求 ID
     void handleCommandAck(const devicescope::protocol::DecodedMessage &message); // 处理命令 ACK
+    void scanPending(); // 扫描待处理命令，处理超时
+    void resetSession(); // 结束会话：未完成命令标失败、清空解包器和定时器
 
     QTcpSocket *m_socket = nullptr; // 网络 socket，生命周期由 worker 管理
     devicescope::protocol::StreamDecoder m_decoder; // 流式协议解码器
@@ -65,6 +70,9 @@ private:
     quint64 m_receivedFrames = 0; // 已接收帧计数
     QElapsedTimer m_clock; // 启动后单调递增，用于命令延迟和后续超时判断
     QHash<quint32, PendingRequest> m_pending;   // requestId -> 待确认命令
+    QTimer *m_timeoutTimer = nullptr; // 100 ms 扫描定时器，仅在 Connected 时运行
+    QTimer *m_heartbeatTimer = nullptr; // 2 s 心跳定时器，仅在 Connected 时运行
+    QElapsedTimer m_lastRx; // 最后一次成功解出报文的时间，用于假死检测
 };
 
 } // namespace devicescope::client

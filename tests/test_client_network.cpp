@@ -93,6 +93,21 @@ public:
     // 收满 count 条命令后逆序回 ACK；0 表示收到即回。
     void collectBeforeReply(int count) { m_collectBeforeReply = count; }
 
+    // 收到 COMMAND 后不回应，用于命令超时场景。
+    void ignoreCommands(bool ignore) { m_ignoreCommands = ignore; }
+
+    // 是否回显 HEARTBEAT，用于验证链路存活。
+    void echoHeartbeats(bool echo) { m_echoHeartbeats = echo; }
+    int heartbeatCount() const { return m_heartbeatCount; }
+
+    // 主动断开当前连接，模拟设备侧掉线。
+    void dropConnection()
+    {
+        if (m_socket != nullptr) {
+            m_socket->disconnectFromHost();
+        }
+    }
+
     void sendAck(quint32 requestId, CommandId commandId, AckResult result,
                  const QString &text)
     {
@@ -131,9 +146,18 @@ private:
                     sendFrame(MessageType::Hello, kFlagResponse, message.header.requestId,
                               payload.value());
                 }
+            } else if (message.header.type == MessageType::Heartbeat) {
+                ++m_heartbeatCount;
+                if (m_echoHeartbeats) {
+                    sendFrame(MessageType::Heartbeat, kFlagResponse,
+                              message.header.requestId, message.payload);
+                }
             } else if (message.header.type == MessageType::Command) {
                 const auto command = decodeCommand(message.payload);
                 if (!command.hasValue()) {
+                    continue;
+                }
+                if (m_ignoreCommands) {
                     continue;
                 }
                 m_requests.append(Request{message.header.requestId, command.value().commandId});
@@ -168,6 +192,9 @@ private:
     StreamDecoder m_decoder;
     QVector<Request> m_requests;
     int m_collectBeforeReply = 0;
+    bool m_ignoreCommands = false;
+    bool m_echoHeartbeats = false;
+    int m_heartbeatCount = 0;
 };
 
 class ClientNetworkTest final : public QObject
@@ -180,6 +207,11 @@ private slots:
     void commandBurstMatchesAcks();
     void outOfOrderAcksMatchCommands();
     void unknownAckIsIgnored();
+    void commandTimeoutAndLateAckIgnored();
+    void heartbeatKeepsConnectionAlive();
+    void silentPeerTriggersHeartbeatTimeout();
+    void pendingCommandFailsOnDisconnect();
+    void staleAckAfterReconnectIsIgnored();
     void commandWhileDisconnectedFails();
 };
 
@@ -244,6 +276,7 @@ void ClientNetworkTest::commandBurstMatchesAcks()
     QSignalSpy sentSpy(&client, &NetworkClient::commandSent);
     QSignalSpy ackSpy(&client, &NetworkClient::commandAcknowledged);
     QSignalSpy failedSpy(&client, &NetworkClient::commandFailed);
+    QSignalSpy timeoutSpy(&client, &NetworkClient::commandTimedOut);
 
     client.connectToHost(QStringLiteral("127.0.0.1"), server.port());
     QTRY_COMPARE_WITH_TIMEOUT(static_cast<int>(lastState(stateSpy)),
@@ -258,6 +291,7 @@ void ClientNetworkTest::commandBurstMatchesAcks()
     QTRY_COMPARE_WITH_TIMEOUT(ackSpy.count(), 50, 5000);
     QCOMPARE(sentSpy.count(), 50);
     QCOMPARE(failedSpy.count(), 0);
+    QCOMPARE(timeoutSpy.count(), 0);
 
     const QHash<quint32, CommandId> sent = sentCommands(sentSpy);
     QCOMPARE(sent.size(), 50);
@@ -325,6 +359,160 @@ void ClientNetworkTest::unknownAckIsIgnored()
     QTRY_COMPARE_WITH_TIMEOUT(ackSpy.count(), 1, 3000);
     QCOMPARE(static_cast<int>(ackSpy.last().at(1).value<CommandId>()),
              static_cast<int>(CommandId::Stop));
+}
+
+void ClientNetworkTest::commandTimeoutAndLateAckIgnored()
+{
+    TestStubServer server;
+    QVERIFY(server.listen());
+    server.ignoreCommands(true);
+
+    NetworkClient client;
+    QSignalSpy stateSpy(&client, &NetworkClient::connectionStateChanged);
+    QSignalSpy sentSpy(&client, &NetworkClient::commandSent);
+    QSignalSpy ackSpy(&client, &NetworkClient::commandAcknowledged);
+    QSignalSpy failedSpy(&client, &NetworkClient::commandFailed);
+    QSignalSpy timeoutSpy(&client, &NetworkClient::commandTimedOut);
+
+    client.connectToHost(QStringLiteral("127.0.0.1"), server.port());
+    QTRY_COMPARE_WITH_TIMEOUT(static_cast<int>(lastState(stateSpy)),
+                              static_cast<int>(ConnectionState::Connected), 3000);
+
+    client.sendCommand(CommandId::Start);
+    QTRY_COMPARE_WITH_TIMEOUT(sentSpy.count(), 1, 1000);
+
+    // 默认超时 3 秒，扫描间隔 100 ms，留出余量到 5 秒。
+    QTRY_COMPARE_WITH_TIMEOUT(timeoutSpy.count(), 1, 5000);
+
+    const quint32 requestId = sentSpy.last().at(0).toUInt();
+    QCOMPARE(timeoutSpy.last().at(0).toUInt(), requestId);
+    QCOMPARE(ackSpy.count(), 0);
+    QCOMPARE(failedSpy.count(), 0);
+
+    // 超时后迟到的 ACK 只能按未知 requestId 处理，不应再产生成功信号。
+    server.sendAck(requestId, CommandId::Start, AckResult::Ok, QStringLiteral("late"));
+    QTest::qWait(200);
+    QCOMPARE(ackSpy.count(), 0);
+    QCOMPARE(timeoutSpy.count(), 1);
+}
+
+void ClientNetworkTest::heartbeatKeepsConnectionAlive()
+{
+    TestStubServer server;
+    QVERIFY(server.listen());
+    server.echoHeartbeats(true);
+
+    NetworkClient client;
+    QSignalSpy stateSpy(&client, &NetworkClient::connectionStateChanged);
+    QSignalSpy errorSpy(&client, &NetworkClient::connectionError);
+
+    client.connectToHost(QStringLiteral("127.0.0.1"), server.port());
+    QTRY_COMPARE_WITH_TIMEOUT(static_cast<int>(lastState(stateSpy)),
+                              static_cast<int>(ConnectionState::Connected), 3000);
+
+    // 心跳间隔 2 秒；收到 3 次约 6 秒，跨过假死阈值后连接仍应保持。
+    QTRY_VERIFY_WITH_TIMEOUT(server.heartbeatCount() >= 3, 7000);
+    QTest::qWait(500);
+    QCOMPARE(errorSpy.count(), 0);
+    QCOMPARE(static_cast<int>(lastState(stateSpy)),
+             static_cast<int>(ConnectionState::Connected));
+}
+
+void ClientNetworkTest::silentPeerTriggersHeartbeatTimeout()
+{
+    TestStubServer server;
+    QVERIFY(server.listen());  // 不回显心跳，握手后完全静默
+
+    NetworkClient client;
+    QSignalSpy stateSpy(&client, &NetworkClient::connectionStateChanged);
+    QSignalSpy errorSpy(&client, &NetworkClient::connectionError);
+
+    client.connectToHost(QStringLiteral("127.0.0.1"), server.port());
+    QTRY_COMPARE_WITH_TIMEOUT(static_cast<int>(lastState(stateSpy)),
+                              static_cast<int>(ConnectionState::Connected), 3000);
+
+    // 6 秒无报文判定假死；留出扫描间隔和调度余量到 8 秒。
+    QTRY_COMPARE_WITH_TIMEOUT(errorSpy.count(), 1, 8000);
+    QCOMPARE(errorSpy.last().at(0).toString(), QStringLiteral("心跳超时"));
+    QCOMPARE(static_cast<int>(lastState(stateSpy)),
+             static_cast<int>(ConnectionState::Error));
+}
+
+void ClientNetworkTest::pendingCommandFailsOnDisconnect()
+{
+    TestStubServer server;
+    QVERIFY(server.listen());
+    server.ignoreCommands(true);
+
+    NetworkClient client;
+    QSignalSpy stateSpy(&client, &NetworkClient::connectionStateChanged);
+    QSignalSpy sentSpy(&client, &NetworkClient::commandSent);
+    QSignalSpy ackSpy(&client, &NetworkClient::commandAcknowledged);
+    QSignalSpy failedSpy(&client, &NetworkClient::commandFailed);
+
+    client.connectToHost(QStringLiteral("127.0.0.1"), server.port());
+    QTRY_COMPARE_WITH_TIMEOUT(static_cast<int>(lastState(stateSpy)),
+                              static_cast<int>(ConnectionState::Connected), 3000);
+
+    client.sendCommand(CommandId::Start);
+    QTRY_COMPARE_WITH_TIMEOUT(sentSpy.count(), 1, 1000);
+    const quint32 requestId = sentSpy.last().at(0).toUInt();
+
+    // 设备主动断开：未完成命令应收到一次性失败通知。
+    server.dropConnection();
+    QTRY_COMPARE_WITH_TIMEOUT(failedSpy.count(), 1, 3000);
+    QCOMPARE(failedSpy.last().at(0).toUInt(), requestId);
+    QCOMPARE(failedSpy.last().at(1).toString(), QStringLiteral("连接断开"));
+    QCOMPARE(ackSpy.count(), 0);
+
+    // onDisconnected 与 fail 路径可能都触发清理，但不得重复通知。
+    QTest::qWait(200);
+    QCOMPARE(failedSpy.count(), 1);
+}
+
+void ClientNetworkTest::staleAckAfterReconnectIsIgnored()
+{
+    TestStubServer server;
+    QVERIFY(server.listen());
+    server.ignoreCommands(true);
+
+    NetworkClient client;
+    QSignalSpy stateSpy(&client, &NetworkClient::connectionStateChanged);
+    QSignalSpy sentSpy(&client, &NetworkClient::commandSent);
+    QSignalSpy ackSpy(&client, &NetworkClient::commandAcknowledged);
+    QSignalSpy failedSpy(&client, &NetworkClient::commandFailed);
+
+    client.connectToHost(QStringLiteral("127.0.0.1"), server.port());
+    QTRY_COMPARE_WITH_TIMEOUT(static_cast<int>(lastState(stateSpy)),
+                              static_cast<int>(ConnectionState::Connected), 3000);
+
+    client.sendCommand(CommandId::Start);
+    QTRY_COMPARE_WITH_TIMEOUT(sentSpy.count(), 1, 1000);
+    const quint32 oldRequestId = sentSpy.last().at(0).toUInt();
+
+    server.dropConnection();
+    QTRY_COMPARE_WITH_TIMEOUT(failedSpy.count(), 1, 3000);
+
+    // 重连后再发一条命令，并让对端正常应答。
+    server.ignoreCommands(false);
+    client.connectToHost(QStringLiteral("127.0.0.1"), server.port());
+    QTRY_COMPARE_WITH_TIMEOUT(static_cast<int>(lastState(stateSpy)),
+                              static_cast<int>(ConnectionState::Connected), 3000);
+
+    client.sendCommand(CommandId::Stop);
+    QTRY_COMPARE_WITH_TIMEOUT(sentSpy.count(), 2, 1000);
+    const quint32 newRequestId = sentSpy.last().at(0).toUInt();
+    QTRY_COMPARE_WITH_TIMEOUT(ackSpy.count(), 1, 3000);
+
+    // 旧会话的迟到 ACK 不得匹配到重连后的新请求。
+    server.sendAck(oldRequestId, CommandId::Start, AckResult::Ok, QStringLiteral("stale"));
+    QTest::qWait(200);
+
+    QCOMPARE(ackSpy.count(), 1);
+    QCOMPARE(ackSpy.last().at(0).toUInt(), newRequestId);
+    QCOMPARE(static_cast<int>(ackSpy.last().at(1).value<CommandId>()),
+             static_cast<int>(CommandId::Stop));
+    QCOMPARE(failedSpy.count(), 1);  // 重连没有产生新的失败通知
 }
 
 void ClientNetworkTest::commandWhileDisconnectedFails()

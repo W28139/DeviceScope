@@ -3,12 +3,21 @@
 #include "devicescope/protocol/Codec.h"
 #include "devicescope/protocol/Message.h"
 
+#include <QtCore/QDateTime>
 #include <QtCore/QDebug>
+#include <QtCore/QTimer>
 #include <QtNetwork/QTcpSocket>
 
 namespace devicescope::client {
 
 using namespace devicescope::protocol;
+
+namespace {
+constexpr int kScanIntervalMs = 100;        // 超时扫描频率
+constexpr qint64 kCommandTimeoutMs = 3000;  // 命令默认超时
+constexpr int kHeartbeatIntervalMs = 2000;  // 心跳发送间隔
+constexpr qint64 kLinkTimeoutMs = 6000;     // 超过该时间没有收到任何报文视为假死
+} // namespace
 
 ConnectionWorker::ConnectionWorker(QObject *parent)
     : QObject(parent)
@@ -18,6 +27,15 @@ ConnectionWorker::ConnectionWorker(QObject *parent)
 void ConnectionWorker::start()
 {
     m_clock.start();
+
+    m_timeoutTimer = new QTimer(this);  // 必须在 worker 线程中创建
+    m_timeoutTimer->setInterval(kScanIntervalMs);
+    connect(m_timeoutTimer, &QTimer::timeout, this, &ConnectionWorker::scanPending);
+
+    m_heartbeatTimer = new QTimer(this);
+    m_heartbeatTimer->setInterval(kHeartbeatIntervalMs);
+    connect(m_heartbeatTimer, &QTimer::timeout, this, &ConnectionWorker::sendHeartbeat);
+
     ensureSocket();
     emit connectionStateChanged(m_state);
 }
@@ -30,7 +48,8 @@ void ConnectionWorker::connectToHost(const QString &host, quint16 port)
         return;
     }
 
-    m_decoder = StreamDecoder();
+    resetSession();  // 清理上一次会话残留；正常情况下已清空，此处保证幂等
+
     m_receivedFrames = 0;
     m_helloRequestId = 0;
     emit statsChanged(0);
@@ -43,10 +62,12 @@ void ConnectionWorker::connectToHost(const QString &host, quint16 port)
 void ConnectionWorker::disconnectFromHost()
 {
     if (m_state == ConnectionState::Error) {
+        resetSession();
         setState(ConnectionState::Disconnected);
         return;
     }
     if (m_socket == nullptr || m_socket->state() == QAbstractSocket::UnconnectedState) {
+        resetSession();
         setState(ConnectionState::Disconnected);
         return;
     }
@@ -62,7 +83,7 @@ void ConnectionWorker::shutdown()
     }
 }
 
-// 发送一条命令，由 UI 线程中的信号触发，跨线程投递到 worker 线程执行
+// 发送一条控制命令，由 UI 线程中的信号触发，跨线程投递到 worker 线程执行
 void ConnectionWorker::sendCommand(CommandId commandId)
 {
     // 分配请求 ID
@@ -122,6 +143,28 @@ void ConnectionWorker::setState(ConnectionState state)
         return;
     }
     m_state = state;
+
+    // 扫描定时器只在 Connected 时运行，断开后不再访问请求表。
+    if (m_timeoutTimer != nullptr) {
+        if (state == ConnectionState::Connected) {
+            m_timeoutTimer->start();
+        } 
+        else {
+            m_timeoutTimer->stop();
+        }
+    }
+
+    // 心跳与假死检测也只在 Connected 期间工作。
+    if (m_heartbeatTimer != nullptr) {
+        if (state == ConnectionState::Connected) {
+            m_lastRx.start();
+            m_heartbeatTimer->start();
+        } 
+        else {
+            m_heartbeatTimer->stop();
+        }
+    }
+
     emit connectionStateChanged(state);
 }
 
@@ -129,8 +172,29 @@ void ConnectionWorker::fail(const QString &message)
 {
     emit connectionError(message);
     setState(ConnectionState::Error);
+    resetSession();
     if (m_socket != nullptr && m_socket->state() != QAbstractSocket::UnconnectedState) {
         m_socket->abort();
+    }
+}
+
+// 结束一次会话：未完成命令统一通知一次失败，清空解包器和定时器状态。
+// 可以重复调用：请求表清空后不会重复发失败信号。
+void ConnectionWorker::resetSession()
+{
+    for (auto it = m_pending.constBegin(); it != m_pending.constEnd(); ++it) {
+        emit commandFailed(it.key(), QStringLiteral("连接断开"));
+    }
+    m_pending.clear();
+
+    m_decoder = StreamDecoder();
+    m_lastRx.invalidate();
+
+    if (m_timeoutTimer != nullptr) {
+        m_timeoutTimer->stop();
+    }
+    if (m_heartbeatTimer != nullptr) {
+        m_heartbeatTimer->stop();
     }
 }
 
@@ -178,6 +242,27 @@ void ConnectionWorker::handleCommandAck(const DecodedMessage &message)
                              ack.value().message, latencyMs);
 }
 
+// 100 ms 扫描一次：超过默认超时的命令移出请求表并上报。
+void ConnectionWorker::scanPending()
+{
+    // 假死检测：超过阈值没有解出任何报文，视为链路失效。
+    if (m_lastRx.isValid() && m_lastRx.elapsed() >= kLinkTimeoutMs) {
+        fail(QStringLiteral("心跳超时"));
+        return;
+    }
+
+    const qint64 now = m_clock.elapsed();
+    for (auto it = m_pending.begin(); it != m_pending.end();) {
+        if (now - it->sentAtMs >= kCommandTimeoutMs) {
+            const quint32 requestId = it.key();
+            it = m_pending.erase(it);
+            emit commandTimedOut(requestId);
+        } else {
+            ++it;
+        }
+    }
+}
+
 // 握手函数
 void ConnectionWorker::sendHello()
 {
@@ -204,8 +289,28 @@ void ConnectionWorker::onConnected()
     sendHello();
 }
 
+// 心跳只用于链路存活，不参与命令超时判定。
+void ConnectionWorker::sendHeartbeat()
+{
+    if (m_socket == nullptr || m_state != ConnectionState::Connected) {
+        return;
+    }
+
+    const auto payload =
+        encodeHeartbeat(Heartbeat{static_cast<quint64>(QDateTime::currentMSecsSinceEpoch())});
+    if (!payload.hasValue()) {
+        return;
+    }
+    const auto frame = encode(MessageType::Heartbeat, kFlagNone, 0, payload.value());
+    if (frame.hasValue()) {
+        m_socket->write(frame.value());
+    }
+}
+
 void ConnectionWorker::onDisconnected()
 {
+    resetSession();
+
     // Error 状态保留，便于 UI 显示失败原因；用户重新连接或点击断开后清除。
     if (m_state != ConnectionState::Error) {
         setState(ConnectionState::Disconnected);
@@ -246,6 +351,7 @@ void ConnectionWorker::onReadyRead()
         const StreamStatus status = m_decoder.next(message);  // 尝试从缓冲区解出一帧
         if (status == StreamStatus::Message) {  // 成功解出一帧
             ++m_receivedFrames;  // 累计已接收帧数
+            m_lastRx.restart();  // 任何完整报文都算链路存活
             emit statsChanged(m_receivedFrames);  // 通知上层统计变化
 
             if (m_state == ConnectionState::Handshaking) {  // 仅在握手阶段处理握手相关消息
