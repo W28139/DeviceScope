@@ -5,7 +5,7 @@
 #include <QtCore/QMutex>
 #include <QtCore/QQueue>
 #include <QtCore/QVector>
-
+// 自己写的一个数据结构，底层是队列
 namespace devicescope::client {
 
 // 线程安全的遥测有界队列：网络 worker 线程写入，UI 线程批量取出。
