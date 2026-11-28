@@ -1,5 +1,6 @@
 #include "network/ConnectionWorker.h"
 
+#include "core/TelemetryQueue.h"
 #include "devicescope/protocol/Codec.h"
 #include "devicescope/protocol/Message.h"
 
@@ -22,8 +23,9 @@ constexpr qint64 kStableConnectionMs = 10000; // 连接稳定该时间后重置�
 constexpr int kReconnectBackoffMs[] = {1000, 2000, 4000, 8000, 16000, 30000};
 } // namespace
 
-ConnectionWorker::ConnectionWorker(QObject *parent)
+ConnectionWorker::ConnectionWorker(TelemetryQueue *telemetry, QObject *parent)
     : QObject(parent)
+    , m_telemetry(telemetry)
 {
 }
 
@@ -250,6 +252,11 @@ void ConnectionWorker::resetSession()
     }
     m_pending.clear();
 
+    // 清掉旧会话残留的遥测，避免重连后与新车数据混杂。
+    if (m_telemetry != nullptr) {
+        m_telemetry->clear();
+    }
+
     m_decoder = StreamDecoder();
     m_lastRx.invalidate();
 
@@ -333,6 +340,21 @@ quint32 ConnectionWorker::nextRequestId()
         m_nextRequestId = 1;
     }
     return id;
+}
+
+// 解码 TELEMETRY 并写入线程安全队列；负载格式错误只记录，不断开连接。
+void ConnectionWorker::handleTelemetry(const DecodedMessage &message)
+{
+    if (m_state != ConnectionState::Connected || m_telemetry == nullptr) {
+        return;
+    }
+
+    const auto telemetry = decodeTelemetry(message.payload);
+    if (!telemetry.hasValue()) {
+        qWarning() << "TELEMETRY 解析失败";
+        return;
+    }
+    m_telemetry->push(telemetry.value());
 }
 
 // 处理服务端返回的 COMMAND_ACK，与 sendCommand() 中登记的 pending 记录闭环
@@ -533,6 +555,8 @@ void ConnectionWorker::onReadyRead()
                 }
             } else if (message.header.type == MessageType::CommandAck) {
                 handleCommandAck(message);  // 按 requestId 匹配命令响应
+            } else if (message.header.type == MessageType::Telemetry) {
+                handleTelemetry(message);   // 解码遥测并入队，由 UI 定时批量取出
             }
             continue;  // 继续解下一帧（可能还有粘包）
         }

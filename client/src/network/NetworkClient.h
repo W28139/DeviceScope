@@ -2,6 +2,7 @@
 
 #include "network/ConnectionState.h"
 
+#include "core/TelemetryQueue.h"
 #include "devicescope/protocol/Protocol.h"
 
 #include <QtCore/QObject>
@@ -24,6 +25,9 @@ public:
     void disconnectFromHost();                              // 主动断开连接（UI 线程调用）
     void sendCommand(devicescope::protocol::CommandId commandId);  // 发送控制命令
 
+    // UI 通过该队列批量取出遥测数据（队列本身线程安全）。
+    TelemetryQueue *telemetryQueue() { return &m_telemetry; }
+
 signals:
     void connectionStateChanged(devicescope::client::ConnectionState state);  // 连接状态变化：Disconnected/Connecting/Connected 等
     void handshakeSucceeded(quint16 deviceId, const QString &deviceName);   // HELLO 握手成功，带回设备身份
@@ -43,6 +47,7 @@ signals:
     void commandRequested(devicescope::protocol::CommandId commandId);  // 跨线程信号：请求 worker 发命令
 
 private:
+    TelemetryQueue m_telemetry; // 线程安全遥测队列；先于 worker 声明，保证生命周期覆盖
     QThread m_thread;       // 工作线程，承载 ConnectionWorker 的事件循环
     ConnectionWorker *m_worker = nullptr;   // 实际干活的 worker，运行在 m_thread 中
 };

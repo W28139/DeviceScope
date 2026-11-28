@@ -1,5 +1,7 @@
 # 客户端核心库：网络层，供 UI 和测试共用
 add_library(devicescope_client_core STATIC
+    src/core/TelemetryQueue.cpp
+    src/core/TelemetryQueue.h
     src/network/ConnectionWorker.cpp
     src/network/ConnectionWorker.h
     src/network/NetworkClient.cpp

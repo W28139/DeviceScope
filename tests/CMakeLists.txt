@@ -76,3 +76,18 @@ target_link_libraries(devicescope_client_tests
 devicescope_set_warnings(devicescope_client_tests)
 
 add_test(NAME client_network COMMAND devicescope_client_tests)
+
+# 遥测有界队列测试：FIFO、满时丢最旧、批量取出与并发写入
+add_executable(devicescope_telemetry_tests
+    test_telemetry_queue.cpp
+)
+
+target_link_libraries(devicescope_telemetry_tests
+    PRIVATE
+        Qt6::Test
+        devicescope_client_core
+)
+
+devicescope_set_warnings(devicescope_telemetry_tests)
+
+add_test(NAME telemetry_queue COMMAND devicescope_telemetry_tests)

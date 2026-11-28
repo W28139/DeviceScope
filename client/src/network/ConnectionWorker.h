@@ -14,13 +14,15 @@ class QTimer;
 
 namespace devicescope::client {
 
+class TelemetryQueue;
+
 // 运行在独立线程中的网络对象：socket 的创建、收发和销毁都发生在这里。
 class ConnectionWorker final : public QObject
 {
     Q_OBJECT
 
 public:
-    explicit ConnectionWorker(QObject *parent = nullptr);
+    explicit ConnectionWorker(TelemetryQueue *telemetry, QObject *parent = nullptr);
 
 public slots:
     void start(); // 线程启动后创建 socket
@@ -59,6 +61,7 @@ private:
     void onReadyRead();    // socket 可读回调，交给 StreamDecoder 解码
     void onSocketError();  // socket 错误回调
     quint32 nextRequestId(); // 生成下一个请求 ID
+    void handleTelemetry(const devicescope::protocol::DecodedMessage &message); // 解码遥测并入队
     void handleCommandAck(const devicescope::protocol::DecodedMessage &message); // 处理命令 ACK
     void scanPending(); // 扫描待处理命令，处理超时
     void resetSession(); // 结束会话：未完成命令标失败、清空解包器和定时器
@@ -69,6 +72,7 @@ private:
     void onSessionLost();      // 会话不可用后决定是否进入自动重连
 
     QTcpSocket *m_socket = nullptr; // 网络 socket，生命周期由 worker 管理
+    TelemetryQueue *m_telemetry = nullptr; // 线程安全遥测队列，由 NetworkClient 持有
     devicescope::protocol::StreamDecoder m_decoder; // 流式协议解码器
     ConnectionState m_state = ConnectionState::Disconnected; // 当前连接状态
     quint32 m_nextRequestId = 1; // 下一个请求 ID

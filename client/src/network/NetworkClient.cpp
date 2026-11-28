@@ -8,7 +8,7 @@ namespace devicescope::client {
 
 NetworkClient::NetworkClient(QObject *parent)
     : QObject(parent)
-    , m_worker(new ConnectionWorker)
+    , m_worker(new ConnectionWorker(&m_telemetry))
 {
     qRegisterMetaType<ConnectionState>("devicescope::client::ConnectionState");
     qRegisterMetaType<devicescope::protocol::CommandId>("devicescope::protocol::CommandId");
