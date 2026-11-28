@@ -40,6 +40,7 @@ signals:
                              qint64 latencyMs);
     void commandFailed(quint32 requestId, const QString &reason);
     void commandTimedOut(quint32 requestId);
+    void reconnectScheduled(int attempt, int delayMs); // 已安排下一次自动重连
 
 private:
     // 已发送、等待 COMMAND_ACK 的命令。
@@ -61,6 +62,11 @@ private:
     void handleCommandAck(const devicescope::protocol::DecodedMessage &message); // 处理命令 ACK
     void scanPending(); // 扫描待处理命令，处理超时
     void resetSession(); // 结束会话：未完成命令标失败、清空解包器和定时器
+    void startConnect(bool resetStats); // 实际发起连接；重连时不清零统计
+    void scheduleReconnect(); // 按退避策略安排下一次自动重连
+    void cancelReconnect();   // 取消待执行的自动重连
+    void onReconnectTimeout(); // 重连定时器到点
+    void onSessionLost();      // 会话不可用后决定是否进入自动重连
 
     QTcpSocket *m_socket = nullptr; // 网络 socket，生命周期由 worker 管理
     devicescope::protocol::StreamDecoder m_decoder; // 流式协议解码器
@@ -73,6 +79,14 @@ private:
     QTimer *m_timeoutTimer = nullptr; // 100 ms 扫描定时器，仅在 Connected 时运行
     QTimer *m_heartbeatTimer = nullptr; // 2 s 心跳定时器，仅在 Connected 时运行
     QElapsedTimer m_lastRx; // 最后一次成功解出报文的时间，用于假死检测
+    QTimer *m_reconnectTimer = nullptr; // 单次自动重连定时器
+    QString m_host; // 最近一次连接目标
+    quint16 m_port = 0;
+    int m_reconnectAttempt = 0; // 连续重连次数，用于指数退避
+    bool m_handshakeDone = false; // 上一次会话是否握手成功过
+    bool m_reconnectActive = false; // 自动重连循环是否进行中
+    bool m_manualDisconnect = false; // 用户主动断开，不自动重连
+    QElapsedTimer m_connectedAt; // 握手成功时刻，稳定 10 秒后重置退避
 };
 
 } // namespace devicescope::client

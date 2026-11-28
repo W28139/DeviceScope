@@ -210,6 +210,9 @@ private slots:
     void commandTimeoutAndLateAckIgnored();
     void heartbeatKeepsConnectionAlive();
     void silentPeerTriggersHeartbeatTimeout();
+    void autoReconnectAfterServerRestart();
+    void manualDisconnectDoesNotReconnect();
+    void reconnectBackoffIncreases();
     void pendingCommandFailsOnDisconnect();
     void staleAckAfterReconnectIsIgnored();
     void commandWhileDisconnectedFails();
@@ -252,11 +255,16 @@ void ClientNetworkTest::failedConnectionReportsError()
     NetworkClient client;
     QSignalSpy stateSpy(&client, &NetworkClient::connectionStateChanged);
     QSignalSpy errorSpy(&client, &NetworkClient::connectionError);
+    QSignalSpy reconnectSpy(&client, &NetworkClient::reconnectScheduled);
 
     client.connectToHost(QStringLiteral("127.0.0.1"), deadPort);
     QTRY_VERIFY_WITH_TIMEOUT(!errorSpy.isEmpty(), 3000);
     QTRY_COMPARE_WITH_TIMEOUT(static_cast<int>(lastState(stateSpy)),
                               static_cast<int>(ConnectionState::Error), 3000);
+
+    // 初次连接失败不自动重试，等待用户手动重连
+    QTest::qWait(200);
+    QCOMPARE(reconnectSpy.count(), 0);
 
     // 失败后仍能重新连接到正常服务器
     SimulatorServer server(makeConfig());
@@ -426,6 +434,7 @@ void ClientNetworkTest::silentPeerTriggersHeartbeatTimeout()
     NetworkClient client;
     QSignalSpy stateSpy(&client, &NetworkClient::connectionStateChanged);
     QSignalSpy errorSpy(&client, &NetworkClient::connectionError);
+    QSignalSpy reconnectSpy(&client, &NetworkClient::reconnectScheduled);
 
     client.connectToHost(QStringLiteral("127.0.0.1"), server.port());
     QTRY_COMPARE_WITH_TIMEOUT(static_cast<int>(lastState(stateSpy)),
@@ -434,8 +443,108 @@ void ClientNetworkTest::silentPeerTriggersHeartbeatTimeout()
     // 6 秒无报文判定假死；留出扫描间隔和调度余量到 8 秒。
     QTRY_COMPARE_WITH_TIMEOUT(errorSpy.count(), 1, 8000);
     QCOMPARE(errorSpy.last().at(0).toString(), QStringLiteral("心跳超时"));
+
+    // 假死属于非手动断开，应安排第一次自动重连（退避 1 秒 ±20%）。
+    QTRY_COMPARE_WITH_TIMEOUT(reconnectSpy.count(), 1, 1000);
+    QCOMPARE(reconnectSpy.last().at(0).toInt(), 1);
+    const int delayMs = reconnectSpy.last().at(1).toInt();
+    QVERIFY(delayMs >= 800 && delayMs <= 1200);
+}
+
+void ClientNetworkTest::autoReconnectAfterServerRestart()
+{
+    const SimulatorConfig config = makeConfig();
+    SimulatorServer server(config);
+    QVERIFY(server.listen());
+    const quint16 port = server.port();
+
+    NetworkClient client;
+    QSignalSpy stateSpy(&client, &NetworkClient::connectionStateChanged);
+    QSignalSpy handshakeSpy(&client, &NetworkClient::handshakeSucceeded);
+    QSignalSpy reconnectSpy(&client, &NetworkClient::reconnectScheduled);
+    QSignalSpy statsSpy(&client, &NetworkClient::statsChanged);
+
+    client.connectToHost(QStringLiteral("127.0.0.1"), port);
+    QTRY_COMPARE_WITH_TIMEOUT(static_cast<int>(lastState(stateSpy)),
+                              static_cast<int>(ConnectionState::Connected), 3000);
+    QCOMPARE(handshakeSpy.count(), 1);
+
+    // 模拟设备掉线，随后在同一端口恢复。
+    server.stop();
+    SimulatorConfig restartConfig = config;
+    restartConfig.port = port;
+    SimulatorServer restarted(restartConfig);
+    QVERIFY(restarted.listen());
+
+    QTRY_COMPARE_WITH_TIMEOUT(handshakeSpy.count(), 2, 5000);
     QCOMPARE(static_cast<int>(lastState(stateSpy)),
-             static_cast<int>(ConnectionState::Error));
+             static_cast<int>(ConnectionState::Connected));
+
+    QVERIFY(!reconnectSpy.isEmpty());
+    QCOMPARE(reconnectSpy.first().at(0).toInt(), 1);
+    const int delayMs = reconnectSpy.first().at(1).toInt();
+    QVERIFY(delayMs >= 800 && delayMs <= 1200);
+
+    // 自动重连不清零收包统计：数值应保持单调不减。
+    quint64 lastFrames = 0;
+    for (const QList<QVariant> &args : statsSpy) {
+        const quint64 frames = args.at(0).toULongLong();
+        QVERIFY(frames >= lastFrames);
+        lastFrames = frames;
+    }
+    QVERIFY(lastFrames > 0);
+}
+
+void ClientNetworkTest::manualDisconnectDoesNotReconnect()
+{
+    SimulatorServer server(makeConfig());
+    QVERIFY(server.listen());
+
+    NetworkClient client;
+    QSignalSpy stateSpy(&client, &NetworkClient::connectionStateChanged);
+    QSignalSpy reconnectSpy(&client, &NetworkClient::reconnectScheduled);
+
+    client.connectToHost(QStringLiteral("127.0.0.1"), server.port());
+    QTRY_COMPARE_WITH_TIMEOUT(static_cast<int>(lastState(stateSpy)),
+                              static_cast<int>(ConnectionState::Connected), 3000);
+
+    client.disconnectFromHost();
+    QTRY_COMPARE_WITH_TIMEOUT(static_cast<int>(lastState(stateSpy)),
+                              static_cast<int>(ConnectionState::Disconnected), 3000);
+
+    // 覆盖第一次退避时长（0.8–1.2 秒），不应出现任何重连计划。
+    QTest::qWait(1500);
+    QCOMPARE(reconnectSpy.count(), 0);
+    QCOMPARE(static_cast<int>(lastState(stateSpy)),
+             static_cast<int>(ConnectionState::Disconnected));
+}
+
+void ClientNetworkTest::reconnectBackoffIncreases()
+{
+    const SimulatorConfig config = makeConfig();
+    SimulatorServer server(config);
+    QVERIFY(server.listen());
+    const quint16 port = server.port();
+
+    NetworkClient client;
+    QSignalSpy stateSpy(&client, &NetworkClient::connectionStateChanged);
+    QSignalSpy reconnectSpy(&client, &NetworkClient::reconnectScheduled);
+
+    client.connectToHost(QStringLiteral("127.0.0.1"), port);
+    QTRY_COMPARE_WITH_TIMEOUT(static_cast<int>(lastState(stateSpy)),
+                              static_cast<int>(ConnectionState::Connected), 3000);
+
+    server.stop();  // 不恢复，观察退避增长
+
+    QTRY_COMPARE_WITH_TIMEOUT(reconnectSpy.count(), 2, 6000);
+
+    QCOMPARE(reconnectSpy.at(0).at(0).toInt(), 1);
+    const int firstDelayMs = reconnectSpy.at(0).at(1).toInt();
+    QVERIFY(firstDelayMs >= 800 && firstDelayMs <= 1200);
+
+    QCOMPARE(reconnectSpy.at(1).at(0).toInt(), 2);
+    const int secondDelayMs = reconnectSpy.at(1).at(1).toInt();
+    QVERIFY(secondDelayMs >= 1600 && secondDelayMs <= 2400);
 }
 
 void ClientNetworkTest::pendingCommandFailsOnDisconnect()

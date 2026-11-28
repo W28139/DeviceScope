@@ -35,6 +35,7 @@ signals:
                              qint64 latencyMs);  // 命令收到 ACK
     void commandFailed(quint32 requestId, const QString &reason);  // 命令未发出
     void commandTimedOut(quint32 requestId);  // 命令在超时时间内没有收到 ACK
+    void reconnectScheduled(int attempt, int delayMs);  // 已安排自动重连（第 attempt 次，delayMs 后）
 
     // 跨线程请求（由 UI 线程发出，worker 线程执行）。
     void connectRequested(const QString &host, quint16 port);   // 跨线程信号：请求 worker 连接

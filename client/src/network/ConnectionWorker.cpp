@@ -5,6 +5,7 @@
 
 #include <QtCore/QDateTime>
 #include <QtCore/QDebug>
+#include <QtCore/QRandomGenerator>
 #include <QtCore/QTimer>
 #include <QtNetwork/QTcpSocket>
 
@@ -17,6 +18,8 @@ constexpr int kScanIntervalMs = 100;        // 超时扫描频率
 constexpr qint64 kCommandTimeoutMs = 3000;  // 命令默认超时
 constexpr int kHeartbeatIntervalMs = 2000;  // 心跳发送间隔
 constexpr qint64 kLinkTimeoutMs = 6000;     // 超过该时间没有收到任何报文视为假死
+constexpr qint64 kStableConnectionMs = 10000; // 连接稳定该时间后重置重连退避
+constexpr int kReconnectBackoffMs[] = {1000, 2000, 4000, 8000, 16000, 30000};
 } // namespace
 
 ConnectionWorker::ConnectionWorker(QObject *parent)
@@ -36,11 +39,15 @@ void ConnectionWorker::start()
     m_heartbeatTimer->setInterval(kHeartbeatIntervalMs);
     connect(m_heartbeatTimer, &QTimer::timeout, this, &ConnectionWorker::sendHeartbeat);
 
+    m_reconnectTimer = new QTimer(this);
+    m_reconnectTimer->setSingleShot(true);
+    connect(m_reconnectTimer, &QTimer::timeout, this, &ConnectionWorker::onReconnectTimeout);
+
     ensureSocket();
     emit connectionStateChanged(m_state);
 }
 
-// 由UI线程中的信号触发而执行
+// 由UI线程中的信号触发而执行；用户主动发起连接
 void ConnectionWorker::connectToHost(const QString &host, quint16 port)
 {
     ensureSocket();
@@ -48,30 +55,76 @@ void ConnectionWorker::connectToHost(const QString &host, quint16 port)
         return;
     }
 
+    // 用户点击连接时，取消重连
+    cancelReconnect();  // 用户手动连接优先于待执行的重连
+
+    // 重置状态，开始新的连接
+    m_host = host;
+    m_port = port;
+    m_manualDisconnect = false;
+    m_reconnectActive = false;
+    m_handshakeDone = false;
+
+    startConnect(true);
+}
+
+// 实际发起连接的函数
+// resetStats = false 重连调用
+// resetStats = true 初次连接
+void ConnectionWorker::startConnect(bool resetStats)
+{
+    ensureSocket();
+    if (m_socket->state() != QAbstractSocket::UnconnectedState) {
+        return;
+    }
+
     resetSession();  // 清理上一次会话残留；正常情况下已清空，此处保证幂等
-
-    m_receivedFrames = 0;
     m_helloRequestId = 0;
-    emit statsChanged(0);
+    if (resetStats) {
+        m_receivedFrames = 0;   // 新连接，重置接收的帧数
+        emit statsChanged(0);
+    }
 
+    // 设置状态为正在连接（第一次连接，不存在连接失败重试逻辑）
     setState(ConnectionState::Connecting);
-    m_socket->connectToHost(host, port);
+    m_socket->connectToHost(m_host, m_port);
 }
 
 // 由UI线程中的信号触发而执行
 void ConnectionWorker::disconnectFromHost()
 {
+    // 标记为“手动断开”，阻止自动重连逻辑被误触发
+    m_manualDisconnect = true;
+    m_reconnectActive = false;   // 关闭重连流程
+    cancelReconnect();           // 取消已排定的重连定时器
+
+    // 情况1：处于错误状态 —— socket 可能已不可用，直接 abort 并复位
     if (m_state == ConnectionState::Error) {
-        resetSession();
+        if (m_socket != nullptr) {
+            m_socket->abort();   // 立即丢弃 socket，不等待底层协议
+        }
+        resetSession();          // 清理会话相关资源
         setState(ConnectionState::Disconnected);
         return;
     }
+
+    // 情况2：没有 socket 或已处于未连接状态 —— 无需真正断开
     if (m_socket == nullptr || m_socket->state() == QAbstractSocket::UnconnectedState) {
         resetSession();
         setState(ConnectionState::Disconnected);
         return;
     }
 
+    // 情况3：正在连接中 —— abort 可立即取消进行中的连接/重连尝试
+    if (m_socket->state() == QAbstractSocket::ConnectingState) {
+        m_socket->abort();       // 取消进行中的连接/重连尝试
+        resetSession();
+        setState(ConnectionState::Disconnected);
+        return;
+    }
+
+    // 情况4：已连接 —— 进入“断开中”状态，优雅关闭
+    // 实际断开完成信号（disconnected）会异步回调，届时再复位状态
     setState(ConnectionState::Disconnecting);
     m_socket->disconnectFromHost();
 }
@@ -198,6 +251,70 @@ void ConnectionWorker::resetSession()
     }
 }
 
+// 会话不可用后决定是否进入自动重连：
+// - 用户手动断开：不重连；
+// - 初次连接从未握手成功：不自动重试，交给用户；
+// - 已握手过的会话异常断开（含重连尝试失败）：按退避继续重连。
+void ConnectionWorker::onSessionLost()
+{
+    // 用户主动断开 —— 不自动重连，同时清除重连标志位 
+    if (m_manualDisconnect) {
+        m_reconnectActive = false;
+        return;
+    }
+    // 握手尚未完成
+    if (!m_handshakeDone) {
+        return;
+    }
+
+    m_reconnectActive = true;
+    scheduleReconnect();
+}
+
+void ConnectionWorker::scheduleReconnect()
+{
+    // 重连定时器已在运行 —— 说明已经安排了下一次重连，无需重复调度
+    if (m_reconnectTimer == nullptr || m_reconnectTimer->isActive()) {
+        return;
+    }
+
+    // 没有目标端口 —— 无法重连，直接放弃并清标志
+    if (m_port == 0) {  
+        m_reconnectActive = false;
+        return;
+    }
+
+    // 计算退避延迟：取当前尝试次数对应的基准值（超过 5 次封顶于最后一档）
+    const int index = qMin(m_reconnectAttempt, 5);
+    const int baseMs = kReconnectBackoffMs[index];
+    //    加入 ±20% 随机抖动，避免多客户端同时掉线后「重连风暴」同步冲击服务端
+    const int jitterMs = baseMs / 5;  // ±20% 抖动
+    const int delayMs = baseMs + QRandomGenerator::global()->bounded(-jitterMs, jitterMs + 1);
+
+    // 先自增尝试计数，再进入等待：
+    //    - 计数用于下一次退避计算，也随信号上报给 UI 展示「第 N 次重连」
+    ++m_reconnectAttempt;
+    //    等待期间状态复用 Connecting：这样断开按钮仍走 disconnectFromHost 的
+    //    "ConnectingState" 分支，可 abort 并取消这次等待中的重连
+    setState(ConnectionState::Connecting);  // 等待期间复用 Connecting，断开按钮可取消
+    emit reconnectScheduled(m_reconnectAttempt, delayMs);
+    // 启动定时器，到点后触发实际的重连（connectToHost + 握手）
+    m_reconnectTimer->start(delayMs);
+}
+
+void ConnectionWorker::cancelReconnect()
+{
+    if (m_reconnectTimer != nullptr) {
+        m_reconnectTimer->stop();
+    }
+    m_reconnectAttempt = 0;
+}
+
+void ConnectionWorker::onReconnectTimeout()
+{
+    startConnect(false);
+}
+
 quint32 ConnectionWorker::nextRequestId()
 {
     const quint32 id = m_nextRequestId++;
@@ -249,6 +366,11 @@ void ConnectionWorker::scanPending()
     if (m_lastRx.isValid() && m_lastRx.elapsed() >= kLinkTimeoutMs) {
         fail(QStringLiteral("心跳超时"));
         return;
+    }
+
+    // 稳定连接超过阈值后，下一次断线重新从 1 秒退避开始。
+    if (m_connectedAt.isValid() && m_connectedAt.elapsed() >= kStableConnectionMs) {
+        m_reconnectAttempt = 0;
     }
 
     const qint64 now = m_clock.elapsed();
@@ -307,16 +429,27 @@ void ConnectionWorker::sendHeartbeat()
     }
 }
 
+// socket 的 QTcpSocket::disconnected 信号回调：连接从已连接变为未连接，如对端关闭
+// 覆盖“已经连上过、然后断开”的主路径
 void ConnectionWorker::onDisconnected()
 {
+    // 清理本次会话资源
     resetSession();
 
-    // Error 状态保留，便于 UI 显示失败原因；用户重新连接或点击断开后清除。
-    if (m_state != ConnectionState::Error) {
-        setState(ConnectionState::Disconnected);
+    // 已进入重连等待时保持 Connecting，避免状态在 Disconnected/Connecting 间闪动,其它状态统一置为 Disconnected
+    if (!m_reconnectActive) {
+        // Error 状态保留，便于 UI 显示失败原因；用户重新连接或点击断开后清除。
+        if (m_state != ConnectionState::Error) {
+            setState(ConnectionState::Disconnected);
+        }
     }
+
+    // 交给掉线处理逻辑决定是否调度重连
+    onSessionLost();
 }
 
+// 任意阶段发生 socket 错误
+// 覆盖“重连尝试本身失败”的路径
 void ConnectionWorker::onSocketError()
 {
     if (m_socket == nullptr) {  // socket 已不存在，没有错误可处理
@@ -340,6 +473,9 @@ void ConnectionWorker::onSocketError()
     default:
         break;
     }
+
+    // socket 已不可用；必要时安排自动重连（连接尝试失败时不会触发 disconnected）
+    onSessionLost();
 }
 
 void ConnectionWorker::onReadyRead()
@@ -372,6 +508,9 @@ void ConnectionWorker::onReadyRead()
                         fail(QStringLiteral("握手被拒绝"));
                         return;
                     }
+                    m_handshakeDone = true;
+                    m_reconnectActive = false;
+                    m_connectedAt.start();
                     setState(ConnectionState::Connected);  // 握手成功，进入已连接状态
                     emit handshakeSucceeded(response.value().deviceId,  // 上报设备 ID
                                             response.value().deviceName);  // 上报设备名
