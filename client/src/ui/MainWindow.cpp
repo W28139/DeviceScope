@@ -35,7 +35,28 @@ MainWindow::MainWindow(QWidget *parent)
             });
     connect(m_network, &NetworkClient::connectionError, this,
             [this](const QString &message) {
-                statusBar()->showMessage(message, 5000);    // 在窗口底部的状态栏上临时显示一段文字 message
+                // 保留错误文本，直到下一次连接或断开
+                statusBar()->showMessage(message);
+            });
+    connect(m_network, &NetworkClient::reconnectScheduled, this,
+            [this](int attempt, int delayMs) {
+                statusBar()->showMessage(
+                    tr("连接断开，第 %1 次重连将在 %2 秒后开始")
+                        .arg(attempt)
+                        .arg(delayMs / 1000.0, 0, 'f', 1));
+            });
+    connect(m_network, &NetworkClient::commandFailed, this,
+            [this](quint32 requestId, const QString &reason) {
+                // 断线批量失败由重连提示统一展示，避免覆盖倒计时
+                if (reason == QStringLiteral("连接断开")) {
+                    return;
+                }
+                statusBar()->showMessage(
+                    tr("命令失败（#%1）：%2").arg(requestId).arg(reason), 5000);
+            });
+    connect(m_network, &NetworkClient::commandTimedOut, this,
+            [this](quint32 requestId) {
+                statusBar()->showMessage(tr("命令超时（#%1）").arg(requestId), 5000);
             });
     connect(m_network, &NetworkClient::statsChanged, this,
             [this](quint64 receivedFrames) {
@@ -122,6 +143,7 @@ void MainWindow::updateForState(devicescope::client::ConnectionState state)
 {
     switch (state) {
     case ConnectionState::Disconnected:
+        statusBar()->clearMessage();
         m_stateLabel->setText(tr("未连接"));
         m_connectButton->setEnabled(true);
         m_disconnectButton->setEnabled(false);
@@ -131,6 +153,7 @@ void MainWindow::updateForState(devicescope::client::ConnectionState state)
         break;
 
     case ConnectionState::Connecting:
+        statusBar()->clearMessage();
         m_stateLabel->setText(tr("连接中…"));
         m_connectButton->setEnabled(false);
         m_disconnectButton->setEnabled(true);
@@ -145,12 +168,14 @@ void MainWindow::updateForState(devicescope::client::ConnectionState state)
         break;
 
     case ConnectionState::Connected:
+        statusBar()->clearMessage();
         m_stateLabel->setText(tr("已连接"));
         m_connectButton->setEnabled(false);
         m_disconnectButton->setEnabled(true);
         break;
 
     case ConnectionState::Disconnecting:
+        statusBar()->clearMessage();
         m_stateLabel->setText(tr("断开中…"));
         m_connectButton->setEnabled(false);
         m_disconnectButton->setEnabled(false);

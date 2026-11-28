@@ -512,8 +512,8 @@ void ClientNetworkTest::manualDisconnectDoesNotReconnect()
     QTRY_COMPARE_WITH_TIMEOUT(static_cast<int>(lastState(stateSpy)),
                               static_cast<int>(ConnectionState::Disconnected), 3000);
 
-    // 覆盖第一次退避时长（0.8–1.2 秒），不应出现任何重连计划。
-    QTest::qWait(1500);
+    // reconnectScheduled 在决定重连时立即发出，短暂等待即可确认没有重连计划。
+    QTest::qWait(200);
     QCOMPARE(reconnectSpy.count(), 0);
     QCOMPARE(static_cast<int>(lastState(stateSpy)),
              static_cast<int>(ConnectionState::Disconnected));

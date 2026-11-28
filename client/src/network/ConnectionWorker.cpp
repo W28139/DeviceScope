@@ -78,6 +78,8 @@ void ConnectionWorker::startConnect(bool resetStats)
         return;
     }
 
+    qInfo() << (resetStats ? "connecting to" : "reconnecting to") << m_host << m_port;
+
     resetSession();  // 清理上一次会话残留；正常情况下已清空，此处保证幂等
     m_helloRequestId = 0;
     if (resetStats) {
@@ -93,6 +95,8 @@ void ConnectionWorker::startConnect(bool resetStats)
 // 由UI线程中的信号触发而执行
 void ConnectionWorker::disconnectFromHost()
 {
+    qInfo() << "manual disconnect requested";
+
     // 标记为“手动断开”，阻止自动重连逻辑被误触发
     m_manualDisconnect = true;
     m_reconnectActive = false;   // 关闭重连流程
@@ -131,6 +135,11 @@ void ConnectionWorker::disconnectFromHost()
 
 void ConnectionWorker::shutdown()
 {
+    // 程序退出等同于手动结束会话：不再安排自动重连
+    m_manualDisconnect = true;
+    m_reconnectActive = false;
+    cancelReconnect();
+
     if (m_socket != nullptr) {
         m_socket->abort();
     }
@@ -223,6 +232,7 @@ void ConnectionWorker::setState(ConnectionState state)
 
 void ConnectionWorker::fail(const QString &message)
 {
+    qWarning() << "connection failed:" << message;
     emit connectionError(message);
     setState(ConnectionState::Error);
     resetSession();
@@ -297,6 +307,7 @@ void ConnectionWorker::scheduleReconnect()
     //    等待期间状态复用 Connecting：这样断开按钮仍走 disconnectFromHost 的
     //    "ConnectingState" 分支，可 abort 并取消这次等待中的重连
     setState(ConnectionState::Connecting);  // 等待期间复用 Connecting，断开按钮可取消
+    qInfo() << "reconnect attempt" << m_reconnectAttempt << "scheduled in" << delayMs << "ms";
     emit reconnectScheduled(m_reconnectAttempt, delayMs);
     // 启动定时器，到点后触发实际的重连（connectToHost + 握手）
     m_reconnectTimer->start(delayMs);
@@ -378,6 +389,7 @@ void ConnectionWorker::scanPending()
         if (now - it->sentAtMs >= kCommandTimeoutMs) {
             const quint32 requestId = it.key();
             it = m_pending.erase(it);
+            qWarning() << "command timed out, requestId" << requestId;
             emit commandTimedOut(requestId);
         } else {
             ++it;
@@ -433,6 +445,8 @@ void ConnectionWorker::sendHeartbeat()
 // 覆盖“已经连上过、然后断开”的主路径
 void ConnectionWorker::onDisconnected()
 {
+    qInfo() << "socket disconnected";
+
     // 清理本次会话资源
     resetSession();
 
@@ -511,6 +525,8 @@ void ConnectionWorker::onReadyRead()
                     m_handshakeDone = true;
                     m_reconnectActive = false;
                     m_connectedAt.start();
+                    qInfo() << "handshake ok: device" << response.value().deviceId
+                             << response.value().deviceName;
                     setState(ConnectionState::Connected);  // 握手成功，进入已连接状态
                     emit handshakeSucceeded(response.value().deviceId,  // 上报设备 ID
                                             response.value().deviceName);  // 上报设备名
